@@ -41,7 +41,7 @@ namespace QuickObjectLoader
 		// Dissolve
 		float d{};
 
-		// Illumination
+		// Illummination
 		int32_t illum{};
 
 		// Ambient Texture Map
@@ -65,11 +65,16 @@ namespace QuickObjectLoader
 
 	struct MeshGroup {
 		std::string Name{};
-		uint32_t FirstIndex{};
-		uint32_t LastIndex{};
-		uint32_t IndicesCount{};
+		size_t FirstIndex{};
+		size_t IndicesCount{};
 		std::vector<std::pair<uint32_t, std::string>> FaceMaterials{};
-		MeshGroup() :Name({}), FirstIndex(0), LastIndex(0), IndicesCount(0) { }
+	};
+
+	struct MeshObject {
+		std::string Name{};
+		std::vector<MeshGroup> Groups{};
+		size_t FirstIndex{};
+		size_t IndicesCount{};
 	};
 
 	struct Mesh
@@ -77,19 +82,248 @@ namespace QuickObjectLoader
 		std::string Name{};
 		std::vector<Vertex> Vertices{};
 		std::vector<uint32_t> Indices{};
+		std::vector<MeshObject> Objects{};
 		std::vector<Material> Materials{};
-		std::vector<MeshGroup> Groups{};
-
-		Mesh() noexcept { }
-		Mesh(const std::string name) : Name(name) {}
 	};
 
-	namespace alg
+	class Loader
 	{
-		inline int32_t ParseInt(const std::string_view& str) {
-			if (str.empty())
-				return 0;
+	public:
 
+		Loader() {}
+		Loader(const std::string_view& path) { LoadFile(path); }
+
+		auto& GetMesh() const { return _mesh; }
+
+		bool LoadFile(const std::string_view& path)
+		{
+			_mesh = {};
+
+			if (path.substr(path.size() - 4, 4) != ".obj")
+				return false;
+
+			std::ifstream file(path.data(), std::ios_base::ate);
+
+			if (!file.is_open())
+				return false;
+
+			const auto length = file.tellg();
+			std::vector<char> content(length);
+			file.seekg(0);
+			file.read(content.data(), length);
+			file.close();
+
+			std::vector<glm::vec2> texCoords;
+			std::vector<glm::vec3> normals;
+			std::vector<std::string_view> temp(30);
+			
+			_mesh.Objects.emplace_back();
+			_mesh.Objects.front().Groups.emplace_back();
+
+			auto* currentObject = &_mesh.Objects.front();
+			auto* currentGroup = &currentObject->Groups.front();
+
+			uint32_t lineStart = 0, lineEnd = 0;
+
+			while (lineEnd < content.size())
+			{
+				lineStart = lineEnd;
+
+				while (content[lineEnd] != '\n' && lineEnd < content.size() - 1) lineEnd++;
+
+				const auto line = std::string_view(&content[lineStart], lineEnd - lineStart);
+
+				if (line.empty() || line[0] == '#' || line[0] == 0) {
+					++lineEnd;
+					continue;
+				}
+
+				const auto firstToken = GetFirstToken(line);
+				const auto curline = line.substr(firstToken.length() + 1);
+
+				// Generate a Mesh Object or Prepare for an object to be created
+				if (!firstToken.compare("o") || !firstToken.compare("g"))
+				{
+					const auto name = curline.length() > 2 ? std::string(curline) : std::string("unnamed");
+
+					if (!firstToken.compare("o")) {
+						if (currentObject->IndicesCount == 0) {
+							currentObject->Name = name;
+							currentObject->FirstIndex = _mesh.Indices.size();
+							currentGroup->FirstIndex = _mesh.Indices.size();
+							currentGroup->IndicesCount = 0;
+						}
+						else {
+							_mesh.Objects.emplace_back(name);
+							currentObject = &_mesh.Objects.back();
+
+							currentObject->FirstIndex = _mesh.Indices.size();
+
+							currentObject->Groups.emplace_back();
+							currentGroup = &currentObject->Groups.back();
+							currentGroup->FirstIndex = _mesh.Indices.size();
+						}
+					}
+					else {
+						if (currentGroup->IndicesCount == 0) {
+							currentGroup->Name = name;
+						}
+						else {
+							currentObject->Groups.emplace_back();
+							currentGroup = &currentObject->Groups.back();
+							const auto index = _mesh.Indices.size();
+							currentGroup->Name = name;
+							currentGroup->FirstIndex = index;
+						}
+
+					}
+				}
+				else if (!firstToken.compare("v")) // Generate a Vertex Position
+				{
+					Split<' '>(curline, temp);
+					_mesh.Vertices.push_back({ { ParseFloat(temp[0]), ParseFloat(temp[1]), ParseFloat(temp[2]) } });
+				}
+				else if (!firstToken.compare("vt")) 				// Generate a Vertex Texture Coordinate
+				{
+					Split<' '>(curline, temp);
+					texCoords.emplace_back(ParseFloat(temp[0]), ParseFloat(temp[1]));
+				}
+				else if (!firstToken.compare("vn")) // Generate a Vertex Normal;
+				{
+					Split<' '>(curline, temp);
+					normals.push_back({ ParseFloat(temp[0]), ParseFloat(temp[1]), ParseFloat(temp[2]) });
+				}
+				else if (!firstToken.compare("f")) // Generate a Face (vertices & indices)
+				{
+					BuildIndicies(*currentObject, *currentGroup, texCoords, normals, curline);
+				}
+				else if (!firstToken.compare("usemtl")) // Get Mesh Material Name
+				{
+					const auto& matName = std::string(curline);
+					currentGroup->FaceMaterials.emplace_back(_mesh.Indices.size(), matName);
+				}
+				else if (!firstToken.compare("mtllib")) // Load Materials
+				{
+					Split<'/'>(path, temp);
+
+					std::string pathtomat;
+
+					if (temp.size() != 1)
+					{
+						for (int i = 0; i < temp.size() - 1; i++) {
+							pathtomat.append(temp[i]);
+							pathtomat.append("/");
+						}
+					}
+
+					pathtomat += std::string(curline);
+
+					LoadMaterials(pathtomat, _mesh.Materials);
+				}
+
+				++lineEnd;
+			}
+
+			if (currentGroup->IndicesCount == 0)
+				_mesh.Objects.back().Groups.pop_back();
+
+			if (currentObject->IndicesCount == 0)
+				_mesh.Objects.pop_back();
+
+			return !_mesh.Objects.empty();
+		}
+
+	private:
+		Mesh _mesh;
+		std::vector<std::string_view> _tempFaces = std::vector<std::string_view>(200);
+		std::vector<std::string_view> _tempVerticies = std::vector<std::string_view>(200);
+		std::vector<uint32_t> _tempIndicies = std::vector<uint32_t>(200);
+
+		template <class T>
+		const T& GetElement(const std::vector<T>& elements, const std::string_view& index) { return elements[ParseInt(index) - 1]; }
+
+		void BuildIndicies(MeshObject& currentMeshObject, MeshGroup& currentMeshGroup, std::vector<glm::vec2>& texCoords, std::vector<glm::vec3>& normals, const std::string_view& currentLine)
+		{
+			_tempFaces.clear();
+			_tempVerticies.clear();
+
+			Split<' '>(currentLine, _tempFaces);
+
+			for (auto i = 0; i < _tempFaces.size(); i++)
+			{
+				Split<'/'>(_tempFaces[i], _tempVerticies);
+				int32_t vtype{};
+
+				// Check for just position - v1
+				if (_tempFaces.size() == 1) // Only position
+					vtype = 1;
+				else if (_tempVerticies.size() == 2) // Check for position & texture - v1/vt1
+					vtype = 2;
+				else if (_tempVerticies.size() == 3) // Check for Position, Texture and Normal - v1/vt1/vn1 // or if Position and Normal - v1//vn1
+					vtype = !_tempVerticies[1].empty() ? 4 : 3; // Position, Texture, and Normal OR  Position & Normal
+
+				auto vertexIndex = static_cast<uint32_t>(ParseInt(_tempVerticies[0]) - 1);
+				auto &vertex = _mesh.Vertices[vertexIndex];
+				
+				_tempIndicies[i] = vertexIndex;
+				
+				switch (vtype)
+				{
+				case 2: // P/T
+				{
+					vertex.TextureCoordinate = GetElement(texCoords, _tempVerticies[1]);
+					break;
+				}
+				case 3: // P//N
+				{
+					vertex.Normal = GetElement(normals, _tempVerticies[2]);
+					break;
+				}
+				case 4: // P/T/N
+				{
+					vertex.TextureCoordinate = GetElement(texCoords, _tempVerticies[1]);
+					vertex.Normal = GetElement(normals, _tempVerticies[2]);
+					break;
+				}
+				default:
+					break;
+				}
+			}
+
+			if (_tempFaces.size() <= 3) {
+				for (auto i = 0; i < _tempFaces.size(); i++)
+					_mesh.Indices.emplace_back(_tempIndicies[i]);
+
+				currentMeshGroup.IndicesCount += _tempFaces.size();
+				currentMeshObject.IndicesCount += _tempFaces.size();
+			}
+			else {
+				const auto firstIndex = _tempIndicies[0];
+
+				//generate fans
+				for (auto i = 1; i < _tempFaces.size() - 1; i++) {
+					_mesh.Indices.emplace_back(firstIndex);
+					_mesh.Indices.emplace_back(_tempIndicies[i]);
+					_mesh.Indices.emplace_back(_tempIndicies[i+1]);
+				}
+
+				const auto indiciesCount = (_tempFaces.size() - 2) * 3;
+				currentMeshGroup.IndicesCount += indiciesCount;
+				currentMeshObject.IndicesCount += indiciesCount;
+			}
+		}
+
+		inline std::string ReplaceAll(std::string& str, const char from, const char to) {
+			size_t start_pos = 0;
+			while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
+				str.replace(std::begin(str), std::end(str), from, to);
+				start_pos += 1; // Handles case where 'to' is a substring of 'from'
+			}
+			return str;
+		}
+
+		inline int32_t ParseInt(const std::string_view& str) {
+			if (str.empty()) return 0;
 			int32_t value;
 			std::from_chars(str.data(), str.data() + str.size(), value);
 			return value;
@@ -103,48 +337,36 @@ namespace QuickObjectLoader
 			std::from_chars(str.data(), str.data() + str.size(), value);
 			return value;
 		}
-	
-		// Split a String into a string array at a given token
-		void Split(const std::string_view& in, std::vector<std::string_view>& out, std::string_view token)
+		
+		template<char token>
+		void Split(const std::string_view& in, std::vector<std::string_view>& out)
 		{
 			out.clear();
+
 			size_t last_position{};
+			const auto bf = in.data();
+			const auto length = in.length();
 
-			while (last_position < in.length()) {
+			while (last_position < length) {
+				size_t end_pos = SIZE_MAX;
 
-				auto end_pos = in.find_first_of(token, last_position);
+				for (auto i = last_position; i < length; i++) {
+					if (bf[i] == token) {
+						end_pos = i;
+						break;
+					}
+				}
 
-				if (end_pos == SIZE_MAX)
-					end_pos = in.size();
-
+				if (end_pos == SIZE_MAX) end_pos = in.size();
 				out.push_back(in.substr(last_position, end_pos - last_position));
 
 				last_position = end_pos + 1;
 			}
 		}
 
-		// Get tail of string after first token and possibly following spaces
-		template <typename T>
-		inline T tail(const std::string_view& in)
-		{
-			size_t token_start = in.find_first_not_of(" \t");
-			size_t space_start = in.find_first_of(" \t", token_start);
-			size_t tail_start = in.find_first_not_of(" \t", space_start);
-			size_t tail_end = in.find_last_not_of(" \t");
-			if (tail_start != std::string::npos && tail_end != std::string::npos)
-				return T(in.substr(tail_start, tail_end - tail_start + 1));
-
-			if (tail_start != std::string::npos)
-				return T(in.substr(tail_start));
-
-			return {};
-		}
-
-		// Get first token of string
 		std::string_view GetFirstToken(const std::string_view& in)
 		{
-			if (in.empty())
-				return {};
+			if (in.empty()) return {};
 
 			const auto token_start = in.find_first_not_of(" \t");
 			const auto token_end = in.find_first_of(" \t", token_start);
@@ -157,69 +379,33 @@ namespace QuickObjectLoader
 
 			return {};
 		}
-
-		// Get element at given index position
-		template <class T>
-		inline const T& GetElement(const std::vector<T>& elements, const std::string_view& index)
+		
+		// Load Materials from .mtl file
+		bool LoadMaterials(std::string path, std::vector<Material>& materials)
 		{
-			auto idx = ParseInt(index);
-
-			if (idx < 0)
-				idx = static_cast<int>(elements.size()) + idx;
-			else
-				idx--;
-
-			return elements[idx];
-		}
-	}
-
-	class Loader
-	{
-	public:
-
-		Loader() {}
-
-		Loader(const std::string_view& path) {
-			LoadFile(path);
-		}
-
-		auto& GetMeshes() const { return _meshes; }
-
-		// Load a file into the loader
-		//
-		// If file is loaded return true
-		//
-		// If the file is unable to be found
-		// or unable to be loaded return false
-		bool LoadFile(const std::string_view& path)
-		{
-			_meshes.clear();
-
-			if (path.substr(path.size() - 4, 4) != ".obj")
+			// If the file is not a material file return false
+			if (path.substr(path.size() - 4, path.size()) != ".mtl")
 				return false;
 
-			
+			path = ReplaceAll(path, '\\', '/');
+			const auto lastSlash = path.find_last_of('/');
+			const std::string rootPath = (lastSlash != std::string::npos) ? path.substr(0, lastSlash + 1) : std::string();
+
 			std::ifstream file(path.data(), std::ios_base::ate);
 
 			if (!file.is_open())
 				return false;
 
-			const uint32_t length = file.tellg();
+			const auto length = file.tellg();
 			std::vector<char> content(length);
 			file.seekg(0);
 			file.read(content.data(), length);
 			file.close();
+			
+			materials.emplace_back();
+			auto* currentMat = &materials.front();
 
-			_meshes.emplace_back();
-			_meshes.front().Groups.emplace_back();
-
-			auto* currentMesh = &_meshes[0];
-			auto* currentGroup = &_meshes[0].Groups[0];
-
-			std::vector<std::string_view> temp(20);
-			std::string tempStrLine;
-			std::vector<glm::vec2> texCoords;
-			std::vector<glm::vec3> normals;
+			std::vector<std::string_view> temp(50);
 
 			uint32_t lineStart = 0, lineEnd = 0;
 
@@ -229,264 +415,79 @@ namespace QuickObjectLoader
 
 				while (content[lineEnd] != '\n' && lineEnd < content.size() - 1) lineEnd++;
 
-				const auto curline = std::string_view(&content[lineStart], lineEnd - lineStart);
-
-				if (curline.empty() || curline[0] == '#') {
-					++lineEnd;
-					continue;
-				}
-
-				const auto firstToken = alg::GetFirstToken(curline);
-
-				// Generate a Mesh Object or Prepare for an object to be created
-				if (!firstToken.compare("o") || !firstToken.compare("g"))
-				{
-					const auto name = curline.length() > 2 ? alg::tail<std::string>(curline) : std::string("unnamed");
-
-					if (!firstToken.compare("o")) {
-						if (currentMesh->Indices.size() == 0 || currentMesh->Vertices.size() == 0) {
-							currentMesh->Name = name;
-							currentGroup->FirstIndex = 0;
-							currentGroup->LastIndex = 0;
-							currentGroup->IndicesCount = 0;
-						}
-						else {
-							_meshes.emplace_back(name);
-							currentMesh = &_meshes[_meshes.size() - 1];
-							currentMesh->Groups.emplace_back();
-							currentGroup = &currentMesh->Groups[currentMesh->Groups.size() - 1];
-						}
-					}
-					else {
-						if (currentGroup->IndicesCount == 0) {
-							currentGroup->Name = name;
-						}
-						else {
-							currentMesh->Groups.emplace_back();
-							currentGroup = &currentMesh->Groups[currentMesh->Groups.size() - 1];
-							const auto index = currentMesh->Indices.size();
-							currentGroup->Name = name;
-							currentGroup->FirstIndex = index;
-							currentGroup->LastIndex = index;
-						}
-
-					}
-				}
-				else if (!firstToken.compare("v")) // Generate a Vertex Position
-				{
-					alg::Split(alg::tail<std::string_view>(curline), temp, " ");
-					currentMesh->Vertices.push_back({ { alg::ParseFloat(temp[0]), alg::ParseFloat(temp[1]), alg::ParseFloat(temp[2]) } });
-				}
-				else if (!firstToken.compare("vt")) 				// Generate a Vertex Texture Coordinate
-				{
-					alg::Split(alg::tail<std::string_view>(curline), temp, " ");
-					texCoords.emplace_back(alg::ParseFloat(temp[0]), alg::ParseFloat(temp[1]));
-				}
-				else if (!firstToken.compare("vn")) // Generate a Vertex Normal;
-				{
-					alg::Split(alg::tail<std::string_view>(curline), temp, " ");
-					normals.push_back({ alg::ParseFloat(temp[0]), alg::ParseFloat(temp[1]), alg::ParseFloat(temp[2]) });
-				}
-				else if (!firstToken.compare("f")) // Generate a Face (vertices & indices)
-				{
-					BuildIndicies(*currentMesh, currentGroup, texCoords, normals, curline);
-				}
-				else if (!firstToken.compare("usemtl")) // Get Mesh Material Name
-				{
-					const auto& matName = alg::tail<std::string_view>(curline);
-					currentGroup->FaceMaterials.emplace_back(currentMesh->Indices.size(), matName);
-				}
-				else if (!firstToken.compare("mtllib")) // Load Materials
-				{
-					alg::Split(path, temp, "/");
-
-					std::string pathtomat;
-
-					if (temp.size() != 1)
-					{
-						for (int i = 0; i < temp.size() - 1; i++) {
-							pathtomat.append(temp[i]);
-							pathtomat.append("/");
-						}
-					}
-
-					pathtomat += alg::tail<std::string>(curline);
-
-					LoadMaterials(pathtomat, currentMesh->Materials);
-				}
+				const auto line = std::string_view(&content[lineStart], lineEnd - lineStart);
 
 				++lineEnd;
-			}
 
+				if (line.empty() || line[0] == '#' || line[0] == 0)
+					continue;
 
-			if (currentMesh->Indices.size() == 0 && currentMesh->Vertices.size() == 0)
-				_meshes.pop_back();
-
-			return !_meshes.empty();
-		}
-
-	private:
-		std::vector<Mesh> _meshes;
-
-		void BuildIndicies(Mesh& mesh, MeshGroup* currentGroup, const std::vector<glm::vec2>& texCoords, const std::vector<glm::vec3>& normals, const std::string_view& currentLine)
-		{
-			std::vector<std::string_view> sface, svert;
-			alg::Split(alg::tail<std::string_view>(currentLine), sface, " ");
-			
-			auto stackIndexArray = (uint32_t*)alloca(sizeof(uint32_t) * sface.size());
-
-			for (auto i = 0; i < sface.size(); i++)
-			{
-				alg::Split(sface[i], svert, "/");
-				int32_t vtype{};
-
-				// Check for just position - v1
-				if (svert.size() == 1) // Only position
-					vtype = 1;
-				else if (svert.size() == 2) // Check for position & texture - v1/vt1
-					vtype = 2;
-				else if (svert.size() == 3) // Check for Position, Texture and Normal - v1/vt1/vn1 // or if Position and Normal - v1//vn1
-					vtype = !svert[1].empty() ? 4 : 3; // Position, Texture, and Normal OR  Position & Normal
-
-				auto vertex = alg::GetElement(mesh.Vertices, svert[0]);
-
-				stackIndexArray[i] = static_cast<uint32_t>(alg::ParseInt(svert[0]) - 1);
-				
-				switch (vtype)
-				{
-				case 2: // P/T
-				{
-					vertex.TextureCoordinate = alg::GetElement(texCoords, svert[1]);
-					break;
-				}
-				case 3: // P//N
-				{
-					vertex.Normal = alg::GetElement(normals, svert[2]);
-					break;
-				}
-				case 4: // P/T/N
-				{
-					vertex.TextureCoordinate = alg::GetElement(texCoords, svert[1]);
-					vertex.Normal = alg::GetElement(normals, svert[2]);
-					break;
-				}
-				default:
-					break;
-				}
-			}
-
-			if (sface.size() <= 3) {
-				for (auto i = 0; i < sface.size(); i++)
-					mesh.Indices.emplace_back(stackIndexArray[i]);
-
-				currentGroup->LastIndex += sface.size();
-				currentGroup->IndicesCount += sface.size();
-			}
-			else {
-				const auto firstIndex = stackIndexArray[0];
-
-				//generate fans
-				for (auto i = 1; i < sface.size() - 1; i++) {
-					mesh.Indices.emplace_back(firstIndex);
-					mesh.Indices.emplace_back(stackIndexArray[i]);
-					mesh.Indices.emplace_back(stackIndexArray[i+1]);
-				}
-
-				currentGroup->LastIndex += (sface.size() - 2) *3 ;
-				currentGroup->IndicesCount += (sface.size() - 2) * 3;
-			}
-		}
-		
-		// Load Materials from .mtl file
-		bool LoadMaterials(std::string path, std::vector<Material>& materials)
-		{
-			// If the file is not a material file return false
-			if (path.substr(path.size() - 4, path.size()) != ".mtl")
-				return false;
-
-			std::ifstream file(path);
-
-			// If the file is not found return false
-			if (!file.is_open())
-				return false;
-
-			Material & currentMat = materials.emplace_back();
-			std::vector<std::string_view> temp(50);
-			auto first = true;
-
-			// Go through each line looking for material variables
-			std::string curStrLine;
-			while (std::getline(file, curStrLine))
-			{
-				const auto curline = std::string_view(curStrLine);
-				const auto firstToken = alg::GetFirstToken(curline);
-
-				temp.clear();
-
+				const auto firstToken = GetFirstToken(line);
+				const auto curline = line.substr(firstToken.length() + 1);
 				if (!firstToken.compare("newmtl")) // new material and material name
 				{
-					const auto name = curline.size() > 7 ? alg::tail<std::string>(curline) : "none";
+					const auto name = curline.size() > 7 ? std::string(curline) : "none";
+					
+					if (currentMat->Name.size() != 0) {
+						materials.emplace_back();
+						currentMat = &materials.back();
+					}
 
-					if (!first)
-						currentMat = materials.emplace_back();
-					else
-						first = false;
-
-					currentMat.Name = name;
+					currentMat->Name = name;
 				}
 				else if (!firstToken.compare("Ka"))  // Ambient Color
 				{
-					alg::Split(alg::tail<std::string_view>(curline), temp, " ");
+					Split<' '>(curline, temp);
 
 					if (temp.size() != 3)
 						continue;
 
-					currentMat.Ka.x = alg::ParseFloat(temp[0]);
-					currentMat.Ka.y = alg::ParseFloat(temp[1]);
-					currentMat.Ka.z = alg::ParseFloat(temp[2]);
+					currentMat->Ka.x = ParseFloat(temp[0]);
+					currentMat->Ka.y = ParseFloat(temp[1]);
+					currentMat->Ka.z = ParseFloat(temp[2]);
 				}
 				else if (!firstToken.compare("Kd")) // Diffuse Color
 				{
-					alg::Split(alg::tail<std::string_view>(curline), temp, " ");
+					Split<' '>(curline, temp);
 
 					if (temp.size() != 3)
 						continue;
 
-					currentMat.Kd.x = alg::ParseFloat(temp[0]);
-					currentMat.Kd.y = alg::ParseFloat(temp[1]);
-					currentMat.Kd.z = alg::ParseFloat(temp[2]);
+					currentMat->Kd.x = ParseFloat(temp[0]);
+					currentMat->Kd.y = ParseFloat(temp[1]);
+					currentMat->Kd.z = ParseFloat(temp[2]);
 				}
 				else if (!firstToken.compare("Ks")) // Specular Color
 				{
-					alg::Split(alg::tail<std::string_view>(curline), temp, " ");
+					Split<' '>(curline, temp);
 
 					if (temp.size() != 3)
 						continue;
 
-					currentMat.Ks.x = alg::ParseFloat(temp[0]);
-					currentMat.Ks.y = alg::ParseFloat(temp[1]);
-					currentMat.Ks.z = alg::ParseFloat(temp[2]);
+					currentMat->Ks.x = ParseFloat(temp[0]);
+					currentMat->Ks.y = ParseFloat(temp[1]);
+					currentMat->Ks.z = ParseFloat(temp[2]);
 				}
 				else if (!firstToken.compare("Ns")) // Specular Exponent
-					currentMat.Ns = alg::ParseFloat(alg::tail<std::string_view>(curline));
+					currentMat->Ns = ParseFloat(curline);
 				else if (!firstToken.compare("Ni")) // Optical Density
-					currentMat.Ni = alg::ParseFloat(alg::tail<std::string_view>(curline));
+					currentMat->Ni = ParseFloat(curline);
 				else if (!firstToken.compare("d")) // Dissolve
-					currentMat.d = alg::ParseFloat(alg::tail<std::string_view>(curline));
+					currentMat->d = ParseFloat(curline);
 				else if (!firstToken.compare("illum")) // Illumination
-					currentMat.illum = alg::ParseInt(alg::tail<std::string_view>(curline));
+					currentMat->illum = ParseInt(curline);
 				else if (!firstToken.compare("map_Ka")) // Ambient Texture Map
-					currentMat.map_Ka = alg::tail<std::string>(curline);
+					currentMat->map_Ka = curline;
 				else if (!firstToken.compare("map_Kd")) // Diffuse Texture Map
-					currentMat.map_Kd = alg::tail<std::string>(curline);
+					currentMat->map_Kd = curline;
 				else if (!firstToken.compare("map_Ks")) // Specular Texture Map
-					currentMat.map_Ks = alg::tail<std::string>(curline);
+					currentMat->map_Ks = curline;
 				else if (!firstToken.compare("map_Ns")) // Specular Hightlight Map
-					currentMat.map_Ns = alg::tail<std::string>(curline);
+					currentMat->map_Ns = curline;
 				else if (!firstToken.compare("map_d")) // Alpha Texture Map
-					currentMat.map_d = alg::tail<std::string>(curline);
+					currentMat->map_d = rootPath + std::string(curline);
 				else if (!firstToken.compare("map_Bump") || !firstToken.compare("map_bump") || !firstToken.compare("bump")) // Bump Map
-					currentMat.map_bump = alg::tail<std::string>(curline);
+					currentMat->map_bump = std::string(curline);
 			}
 
 			return true;

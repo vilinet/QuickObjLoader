@@ -1,6 +1,5 @@
 #pragma once
 
-#include <iostream>
 #include <vector>
 #include <string>
 #include <fstream>
@@ -139,7 +138,15 @@ namespace QuickObjectLoader
 				}
 
 				const auto firstToken = GetFirstToken(line);
-				const auto curline = line.substr(firstToken.length() + 1);
+				auto start = firstToken.length() + 1;
+				for (auto i = start; i < line.length(); i++) {
+					if (!std::isspace(line[i])) {
+						start = i;
+						break;
+					}
+				}
+
+				const auto curline = line.substr(start);
 
 				// Generate a Mesh Object or Prepare for an object to be created
 				if (!firstToken.compare("o") || !firstToken.compare("g"))
@@ -175,22 +182,21 @@ namespace QuickObjectLoader
 							currentGroup->Name = name;
 							currentGroup->FirstIndex = index;
 						}
-
 					}
 				}
 				else if (!firstToken.compare("v")) // Generate a Vertex Position
 				{
-					Split<' '>(curline, temp);
+					SplitByWhitespace(curline, temp);
 					_mesh.Vertices.push_back({ { ParseFloat(temp[0]), ParseFloat(temp[1]), ParseFloat(temp[2]) } });
 				}
 				else if (!firstToken.compare("vt")) 				// Generate a Vertex Texture Coordinate
 				{
-					Split<' '>(curline, temp);
+					SplitByWhitespace(curline, temp);
 					texCoords.emplace_back(ParseFloat(temp[0]), ParseFloat(temp[1]));
 				}
 				else if (!firstToken.compare("vn")) // Generate a Vertex Normal;
 				{
-					Split<' '>(curline, temp);
+					SplitByWhitespace(curline, temp);
 					normals.push_back({ ParseFloat(temp[0]), ParseFloat(temp[1]), ParseFloat(temp[2]) });
 				}
 				else if (!firstToken.compare("f")) // Generate a Face (vertices & indices)
@@ -199,8 +205,7 @@ namespace QuickObjectLoader
 				}
 				else if (!firstToken.compare("usemtl")) // Get Mesh Material Name
 				{
-					const auto& matName = std::string(curline);
-					currentGroup->FaceMaterials.emplace_back(_mesh.Indices.size(), matName);
+					currentGroup->FaceMaterials.push_back({ _mesh.Indices.size(), std::string(curline)});
 				}
 				else if (!firstToken.compare("mtllib")) // Load Materials
 				{
@@ -247,7 +252,7 @@ namespace QuickObjectLoader
 			_tempFaces.clear();
 			_tempVerticies.clear();
 
-			Split<' '>(currentLine, _tempFaces);
+			SplitByWhitespace(currentLine, _tempFaces);
 
 			for (auto i = 0; i < _tempFaces.size(); i++)
 			{
@@ -315,6 +320,7 @@ namespace QuickObjectLoader
 
 		inline std::string ReplaceAll(std::string& str, const char from, const char to) {
 			size_t start_pos = 0;
+
 			while ((start_pos = str.find(from, start_pos)) != std::string::npos) {
 				str.replace(std::begin(str), std::end(str), from, to);
 				start_pos += 1; // Handles case where 'to' is a substring of 'from'
@@ -330,9 +336,7 @@ namespace QuickObjectLoader
 		}
 
 		inline float ParseFloat(const std::string_view& str) {
-			if (str.empty())
-				return 0.f;
-
+			if (str.empty()) return 0.f;
 			float value;
 			std::from_chars(str.data(), str.data() + str.size(), value);
 			return value;
@@ -348,7 +352,7 @@ namespace QuickObjectLoader
 			const auto length = in.length();
 
 			while (last_position < length) {
-				size_t end_pos = SIZE_MAX;
+				auto end_pos = SIZE_MAX;
 
 				for (auto i = last_position; i < length; i++) {
 					if (bf[i] == token) {
@@ -358,9 +362,38 @@ namespace QuickObjectLoader
 				}
 
 				if (end_pos == SIZE_MAX) end_pos = in.size();
+			
 				out.push_back(in.substr(last_position, end_pos - last_position));
-
+				
 				last_position = end_pos + 1;
+			}
+		}
+
+		void SplitByWhitespace(const std::string_view& in, std::vector<std::string_view>& out)
+		{
+			out.clear();
+
+			size_t start_pos{};
+			const auto bf = in.data();
+			const auto length = in.length();
+
+			while (start_pos < length) {
+				auto end_pos = SIZE_MAX;
+
+				for (auto i = start_pos; i < length; i++) {
+					if (std::isspace(bf[i])) {
+						end_pos = i;
+						break;
+					}
+				}	
+
+				if (end_pos == SIZE_MAX) end_pos = in.size();
+				else if (end_pos == start_pos && std::isspace(bf[end_pos])) {
+					start_pos = end_pos + 1;
+					continue;
+				}
+				out.push_back(in.substr(start_pos, end_pos - start_pos - 1));
+				start_pos = end_pos;
 			}
 		}
 
@@ -372,15 +405,14 @@ namespace QuickObjectLoader
 			const auto token_end = in.find_first_of(" \t", token_start);
 
 			if (token_start != std::string_view::npos && token_end != std::string_view::npos)
-				return std::string_view(in.substr(token_start, token_end - token_start));
+				return in.substr(token_start, token_end - token_start);
 
 			if (token_start != std::string_view::npos)
-				return std::string_view(in.substr(token_start));
+				return in.substr(token_start);
 
 			return {};
 		}
 		
-		// Load Materials from .mtl file
 		bool LoadMaterials(std::string path, std::vector<Material>& materials)
 		{
 			// If the file is not a material file return false
@@ -437,7 +469,7 @@ namespace QuickObjectLoader
 				}
 				else if (!firstToken.compare("Ka"))  // Ambient Color
 				{
-					Split<' '>(curline, temp);
+					SplitByWhitespace(curline, temp);
 
 					if (temp.size() != 3)
 						continue;
@@ -448,7 +480,7 @@ namespace QuickObjectLoader
 				}
 				else if (!firstToken.compare("Kd")) // Diffuse Color
 				{
-					Split<' '>(curline, temp);
+					SplitByWhitespace(curline, temp);
 
 					if (temp.size() != 3)
 						continue;
@@ -459,7 +491,7 @@ namespace QuickObjectLoader
 				}
 				else if (!firstToken.compare("Ks")) // Specular Color
 				{
-					Split<' '>(curline, temp);
+					SplitByWhitespace(curline, temp);
 
 					if (temp.size() != 3)
 						continue;

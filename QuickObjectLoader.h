@@ -66,7 +66,6 @@ namespace QuickObjectLoader
 		std::string Name{};
 		size_t FirstIndex{};
 		size_t IndicesCount{};
-		std::vector<std::pair<uint32_t, std::string>> FaceMaterials{};
 	};
 
 	struct MeshObject {
@@ -76,6 +75,13 @@ namespace QuickObjectLoader
 		size_t IndicesCount{};
 	};
 
+	struct MaterialEntry
+	{
+		size_t FirstIndex{};
+		size_t IndicesCount{};
+		size_t MaterialIndex{};
+	};
+
 	struct Mesh
 	{
 		std::string Name{};
@@ -83,6 +89,10 @@ namespace QuickObjectLoader
 		std::vector<uint32_t> Indices{};
 		std::vector<MeshObject> Objects{};
 		std::vector<Material> Materials{};
+		/// <summary>
+		/// INDEX, MATERIAL ID, indicies count
+		/// </summary>
+		std::vector<MaterialEntry> MaterialIndices{};
 	};
 
 	class Loader
@@ -123,6 +133,7 @@ namespace QuickObjectLoader
 			auto* currentGroup = &currentObject->Groups.front();
 
 			uint32_t lineStart = 0, lineEnd = 0;
+			size_t lastMaterialIndex = 0;
 
 			while (lineEnd < content.size())
 			{
@@ -205,7 +216,24 @@ namespace QuickObjectLoader
 				}
 				else if (!firstToken.compare("usemtl")) // Get Mesh Material Name
 				{
-					currentGroup->FaceMaterials.push_back({ _mesh.Indices.size(), std::string(curline)});
+					bool found = false;
+					for (size_t i = 0; i < _mesh.Materials.size(); i++) {
+						if (!_mesh.Materials[i].Name.compare(curline)) {
+							if (!_mesh.MaterialIndices.empty()) {
+								auto &item = _mesh.MaterialIndices.back();
+								item.IndicesCount = _mesh.Indices.size() - lastMaterialIndex;
+							}
+							
+							_mesh.MaterialIndices.emplace_back(_mesh.Indices.size(), 0, i);
+							lastMaterialIndex = _mesh.Indices.size();
+							found = true;
+							break;
+						}
+					}
+
+					if (!found) {
+						assert("Material not found");
+					}
 				}
 				else if (!firstToken.compare("mtllib")) // Load Materials
 				{
@@ -234,6 +262,12 @@ namespace QuickObjectLoader
 
 			if (currentObject->IndicesCount == 0)
 				_mesh.Objects.pop_back();
+
+
+			if (!_mesh.MaterialIndices.empty()) {
+				auto& item = _mesh.MaterialIndices.back();
+				item.IndicesCount = _mesh.Indices.size() - lastMaterialIndex;
+			}
 
 			return !_mesh.Objects.empty();
 		}
@@ -458,7 +492,7 @@ namespace QuickObjectLoader
 				const auto curline = line.substr(firstToken.length() + 1);
 				if (!firstToken.compare("newmtl")) // new material and material name
 				{
-					const auto name = curline.size() > 7 ? std::string(curline) : "none";
+					const auto name = !curline.empty() ? std::string(curline) : "none";
 					
 					if (currentMat->Name.size() != 0) {
 						materials.emplace_back();
